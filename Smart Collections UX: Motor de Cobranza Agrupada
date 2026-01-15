@@ -1,0 +1,274 @@
+/**
+ * 📧 SMART COLLECTIONS UX - MOTOR DE COBRANZA AGRUPADA
+ * ===================================================
+ * Automatización que consolida múltiples facturas pendientes en un único
+ * estado de cuenta HTML dinámico, aplicando psicología del color según
+ * el nivel de urgencia de la deuda.
+ */
+
+// ==========================================================
+// ⚙️ CONFIGURACIÓN
+// ==========================================================
+// ID de la carpeta en Google Drive donde se almacenan los PDFs de las facturas
+const ID_CARPETA_FACTURAS = "1gyLi_eKNbYLbzjp6l5aoM-gAUaLr2cGJ"; 
+// ==========================================================
+
+function enviarCobranzaWawa_Agrupado_Colores() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var hoja = ss.getActiveSheet();
+  var ultimaFila = hoja.getLastRow();
+  
+  if (ultimaFila < 2) return;
+
+  // Se asume que la data va de la columna 1 a la 18 (A:R)
+  var rango = hoja.getRange(2, 1, ultimaFila - 1, 18);
+  var datos = rango.getDisplayValues(); 
+  
+  var ahora = new Date(); 
+  var zonaHoraria = ss.getSpreadsheetTimeZone();
+
+  // Gestión de Hoja Historial (Auditoría)
+  var hojaHistorial = ss.getSheetByName("Historial");
+  if (!hojaHistorial) {
+    hojaHistorial = ss.insertSheet("Historial");
+    hojaHistorial.appendRow(["Fecha Envío", "Email", "Facturas Enviadas", "Monto Total", "Resultado", "Ref"]);
+    hojaHistorial.getRange(1, 1, 1, 6).setFontWeight("bold").setBackground("#eeeeee");
+  }
+
+  // 1. AGRUPAR DATOS POR EMAIL (Lógica de Diccionario)
+  var grupos = {};
+
+  for (var i = 0; i < datos.length; i++) {
+    var fila = datos[i];
+    
+    // Variables de Envío
+    var email = fila[0];          
+    var fechaTexto = fila[1];     
+    var horaTexto = fila[2];      
+    var tipoMensajeManual = parseInt(fila[3]) || 1; 
+    var frecuenciaHoras = parseFloat(fila[4]) || 0; 
+    var emailsCopia = fila[5];    
+    
+    // Variables de Tabla (Detalle Factura)
+    var datoServicio = fila[6];
+    var datoCodProv = fila[7];
+    var datoProveedor = fila[8];
+    var datoUnidad = fila[9];
+    var numFactura = fila[10];
+    var fechaVencimiento = fila[11];
+    var monto = fila[12];
+    var datoOC = fila[13];
+    var datoAceptacion = fila[14];
+    
+    var estado = fila[17];           
+
+    // Validaciones de Integridad
+    if (email === "" || fechaTexto === "") continue;
+    var estadoSeguro = String(estado);
+    if (estadoSeguro.includes("Enviado") || estadoSeguro.includes("Cancelado") || estadoSeguro.includes("Pagado")) continue;
+
+    // Validación de Fecha/Hora Programada
+    var esHora = false;
+    var fechaProg = null;
+    try {
+      var partesFecha = fechaTexto.split(fechaTexto.includes("/") ? "/" : "-");
+      var partesHora = horaTexto.split(":");
+      if (partesFecha.length === 3) {
+        var anio = partesFecha[0].length === 4 ? parseInt(partesFecha[0]) : parseInt(partesFecha[2]);
+        var mes = (partesFecha[0].length === 4 ? parseInt(partesFecha[1]) : parseInt(partesFecha[1])) - 1;
+        var dia = partesFecha[0].length === 4 ? parseInt(partesFecha[2]) : parseInt(partesFecha[0]);
+        fechaProg = new Date(anio, mes, dia, parseInt(partesHora[0]||0), parseInt(partesHora[1]||0));
+        
+        if (ahora >= fechaProg) esHora = true;
+      }
+    } catch(e) {}
+
+    if (!esHora || !fechaProg) continue;
+
+    // Inicializar grupo si no existe
+    if (!grupos[email]) {
+      grupos[email] = {
+        filas: [], 
+        datosCliente: {
+          copias: emailsCopia,
+          frecuencia: frecuenciaHoras
+        },
+        facturas: []
+      };
+    }
+
+    // Agregar factura al array del cliente
+    grupos[email].facturas.push({
+      servicio: datoServicio,
+      codProv: datoCodProv,
+      proveedor: datoProveedor,
+      unidad: datoUnidad,
+      numFactura: numFactura,
+      vencimiento: fechaVencimiento,
+      monto: monto,
+      oc: datoOC,
+      aceptacion: datoAceptacion,
+      indiceFila: i,
+      nivel: tipoMensajeManual,
+      fechaBase: fechaProg
+    });
+    
+    grupos[email].filas.push(i);
+  }
+
+  // 2. PROCESAR CADA GRUPO (Envío Agrupado)
+  for (var emailDestino in grupos) {
+    var grupo = grupos[emailDestino];
+    var listaFacturas = grupo.facturas;
+    
+    // Determinamos el NIVEL MÁXIMO de urgencia del grupo
+    // Si una sola factura es Roja (Nivel 3), todo el correo se vuelve Rojo.
+    var mensajeSeleccionado = 1;
+    for (var k=0; k<listaFacturas.length; k++) {
+       if (listaFacturas[k].nivel > mensajeSeleccionado) mensajeSeleccionado = listaFacturas[k].nivel;
+    }
+
+    // --- SELECCIÓN DE COLORES Y TEXTOS DINÁMICOS (UX) ---
+    var colorPrincipal = "";
+    var colorTextoMonto = "";
+    var textoIntro = "";
+    var asuntoTexto = "";
+
+    if (mensajeSeleccionado == 1) {
+       // AZUL (Informativo)
+       colorPrincipal = "#2980b9"; 
+       colorTextoMonto = "#2980b9";
+       asuntoTexto = "Envío de facturas para registro";
+       textoIntro = "Buen día, el presente es para hacerles llegar estas facturas para su registro:";
+    } else if (mensajeSeleccionado == 2) {
+       // NARANJA (Advertencia)
+       colorPrincipal = "#f39c12"; 
+       colorTextoMonto = "#d35400";
+       asuntoTexto = "Solicitud de pago de facturas";
+       textoIntro = "Buen día,<br><br>El presente es para solicitar el pago de las siguientes facturas:";
+    } else if (mensajeSeleccionado == 3) {
+       // ROJO (Urgencia)
+       colorPrincipal = "#c0392b"; 
+       colorTextoMonto = "#c0392b";
+       asuntoTexto = "URGENTE: Respuesta sobre pago de facturas";
+       textoIntro = "Buen día,<br><br><strong style='color: #c0392b;'>Requerimos con urgencia respuesta</strong> en relación al pago de las siguientes facturas:";
+    }
+
+    // BUSCAR ADJUNTOS EN DRIVE
+    var archivosAdjuntos = [];
+    var facturasNoEncontradas = [];
+    try {
+      var carpeta = DriveApp.getFolderById(ID_CARPETA_FACTURAS);
+      for (var f = 0; f < listaFacturas.length; f++) {
+        var fact = listaFacturas[f];
+        if (fact.numFactura) {
+          // Búsqueda flexible por nombre de archivo
+          var archivos = carpeta.searchFiles("title contains '" + fact.numFactura + "' and trashed = false");
+          if (archivos.hasNext()) {
+            archivosAdjuntos.push(archivos.next().getBlob());
+          } else {
+            facturasNoEncontradas.push(fact.numFactura);
+          }
+        }
+      }
+    } catch (e) { console.log("Error Drive: " + e.message); }
+
+    // CONSTRUIR TABLA HTML DINÁMICA
+    var stHeader = `padding: 8px; border: 1px solid #ddd; background-color: ${colorPrincipal}; color: white; font-size: 12px; text-align: center;`;
+    var stCell = "padding: 8px; border: 1px solid #ddd; font-size: 12px; text-align: center;";
+    var filasHTML = "";
+
+    for (var f = 0; f < listaFacturas.length; f++) {
+      var item = listaFacturas[f];
+      filasHTML += `<tr>
+        <td style="${stCell}">${item.servicio}</td>
+        <td style="${stCell}">${item.codProv}</td>
+        <td style="${stCell}">${item.proveedor}</td>
+        <td style="${stCell}">${item.unidad}</td>
+        <td style="${stCell}"><strong>${item.numFactura}</strong></td>
+        <td style="${stCell}; color: ${mensajeSeleccionado > 1 ? '#c0392b' : '#333'};">${item.vencimiento}</td>
+        <td style="${stCell}; font-weight: bold; color: ${colorTextoMonto};">${item.monto}</td>
+        <td style="${stCell}">${item.oc}</td>
+        <td style="${stCell}">${item.aceptacion}</td>
+      </tr>`;
+    }
+
+    var tablaHorizontal = `<table style="width: 100%; border-collapse: collapse; font-family: Arial, sans-serif; margin: 20px 0;">
+      <thead>
+        <tr>
+          <th style="${stHeader}">Servicio</th>
+          <th style="${stHeader}">Cód. Prov.</th>
+          <th style="${stHeader}">Proveedor</th>
+          <th style="${stHeader}">Unidad</th>
+          <th style="${stHeader}">FACTURA</th>
+          <th style="${stHeader}">Vencimiento</th>
+          <th style="${stHeader}">Monto</th>
+          <th style="${stHeader}">OC</th>
+          <th style="${stHeader}">Aceptación</th>
+        </tr>
+      </thead>
+      <tbody>${filasHTML}</tbody>
+    </table>`;
+
+    var refUnica = Math.floor(Math.random() * 90000) + 10000;
+    var asunto = `Servicio Wawa: ${asuntoTexto} (Ref: ${refUnica})`;
+    
+    // Plantilla HTML Completa
+    var htmlCuerpo = `
+      <div style="font-family: Arial, sans-serif; background-color: #f4f4f4; padding: 20px;">
+        <div style="max-width: 900px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; padding: 30px; border: 1px solid #ddd; border-top: 5px solid ${colorPrincipal};">
+          <h2 style="color: ${colorPrincipal}; margin-top: 0;">Gestión Administrativa</h2>
+          <p style="font-size: 15px;">${textoIntro}</p>
+          ${tablaHorizontal}
+          <p>Se adjuntan los soportes correspondientes.</p>
+          <hr>
+          <p style="font-size: 11px; color: #999;">Notificación automática Wawa</p>
+        </div>
+      </div>
+    `;
+
+    // ENVIAR
+    try {
+      MailApp.sendEmail({
+        to: emailDestino,
+        cc: grupo.datosCliente.copias,
+        subject: asunto,
+        htmlBody: htmlCuerpo,
+        attachments: archivosAdjuntos
+      });
+
+      // ACTUALIZAR ESTADO EN LA HOJA
+      var infoEstado = "Enviado Agrupado (Msj " + mensajeSeleccionado + ")";
+      if (facturasNoEncontradas.length > 0) infoEstado += " (Faltan PDFs)";
+      
+      for (var k = 0; k < listaFacturas.length; k++) {
+        var itemFactura = listaFacturas[k];
+        var idx = itemFactura.indiceFila;
+        var filaSheet = idx + 2; 
+        
+        hoja.getRange(filaSheet, 18).setValue(infoEstado); 
+
+        // REPROGRAMACIÓN INTELIGENTE (Sin Desviación Temporal)
+        if (grupo.datosCliente.frecuencia > 0) {
+           var fechaBase = itemFactura.fechaBase; 
+           var nuevaFecha = new Date(fechaBase.getTime() + (grupo.datosCliente.frecuencia * 60 * 60 * 1000));
+           
+           var nuevaFechaTexto = Utilities.formatDate(nuevaFecha, zonaHoraria, "yyyy-MM-dd");
+           var nuevaHoraTexto = Utilities.formatDate(nuevaFecha, zonaHoraria, "HH:mm");
+
+           hoja.getRange(filaSheet, 2).setValue(nuevaFechaTexto); 
+           hoja.getRange(filaSheet, 3).setValue(nuevaHoraTexto);  
+           hoja.getRange(filaSheet, 18).setValue("Reprogramado Agrupado");
+        }
+      }
+      
+      hojaHistorial.appendRow([new Date(), emailDestino, listaFacturas.length, "N/A", infoEstado, refUnica]);
+
+    } catch (e) {
+      // Manejo de error específico por grupo
+      for (var k = 0; k < listaFacturas.length; k++) {
+        hoja.getRange(listaFacturas[k].indiceFila + 2, 18).setValue("Error: " + e.message);
+      }
+    }
+  }
+}
